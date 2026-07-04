@@ -1,133 +1,64 @@
-<script setup>
-import { ref, onMounted } from 'vue'
-
-const props = defineProps({
-  currentDate: { type: String, required: true }
-})
-
-const supabase = useSupabaseClient()
-const fileInput = ref(null)
-const isUploading = ref(false)
-const uploadProgress = ref(0)
-const evidenceList = ref([])
-
-// 載入證據
-const fetchEvidence = async () => {
-  const { data } = await supabase
-    .from('evidence_logs')
-    .select('*')
-    .eq('log_date', props.currentDate)
-  if (data) evidenceList.value = data
-}
-
-onMounted(() => {
-  fetchEvidence()
-})
-
-// 批次上傳邏輯
-const handleBatchUpload = async () => {
-  const files = fileInput.value?.files
-  if (!files || files.length === 0) return
-
-  isUploading.value = true
-  uploadProgress.value = 10
-
-  const formData = new FormData()
-  for (let i = 0; i < files.length; i++) {
-    formData.append('files', files[i])
+export default defineEventHandler(async (event) => {
+  const formData = await readMultipartFormData(event)
+  
+  if (!formData) {
+    throw createError({ statusCode: 400, statusMessage: '沒有找到檔案，或檔案容量超過伺服器限制' })
   }
 
-  try {
-    uploadProgress.value = 50
-    const response = await $fetch('/api/upload-evidence', {
-      method: 'POST',
-      body: formData
-    })
+  // 1. 確保環境變數有成功抓到 (避免回傳 "undefined" 給 TG)
+  const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN
+  const CHAT_ID = process.env.TELEGRAM_CHAT_ID
 
-    if (response.success) {
-      uploadProgress.value = 80
-      const insertData = response.results
-        .filter(r => r.status === 'success')
-        .map(r => ({
-          log_date: props.currentDate,
-          title: r.fileName.split('.')[0],
-          telegram_url: r.telegramUrl,
-          file_name: r.fileName
-        }))
+  if (!BOT_TOKEN || !CHAT_ID) {
+    throw createError({ statusCode: 500, statusMessage: '伺服器缺少 Telegram Token 或 Chat ID' })
+  }
 
-      if (insertData.length > 0) {
-        const { data, error } = await supabase
-          .from('evidence_logs')
-          .insert(insertData)
-          .select()
+  const results = []
 
-        if (!error && data) {
-          evidenceList.value.push(...data)
-          alert(`✅ 成功上傳 ${insertData.length} 筆錄音證據！`)
+  for (const field of formData) {
+    if (field.name === 'files' && field.data) {
+      const tgFormData = new FormData()
+      
+      // 2. 嚴謹處理檔名與類型 (Telegram API 嚴格要求一定要有 filename)
+      const filename = field.filename || `audio_${Date.now()}.m4a`
+      const mimeType = field.type || 'application/octet-stream'
+      
+      const blob = new Blob([field.data], { type: mimeType })
+      
+      tgFormData.append('chat_id', CHAT_ID)
+      tgFormData.append('document', blob, filename)
+      tgFormData.append('caption', `📅 證據歸檔：${filename}`)
+
+      try {
+        // 3. ⚠️ 關鍵修正：改用全域原生的 fetch，捨棄 $fetch，完美解決 FormData 傳輸錯誤
+        const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendDocument`, {
+          method: 'POST',
+          body: tgFormData
+        })
+
+        // 解析 Telegram 的回傳值
+        const tgResponse = await response.json()
+
+        if (!tgResponse.ok) {
+          throw new Error(tgResponse.description || 'Telegram 拒絕了此檔案')
         }
+
+        const messageId = tgResponse.result.message_id
+        const rawChatId = tgResponse.result.chat.id.toString().replace('-100', '')
+        const tgLink = `https://t.me/c/${rawChatId}/${messageId}`
+
+        results.push({
+          fileName: filename,
+          telegramUrl: tgLink,
+          status: 'success'
+        })
+      } catch (error) {
+        // 在終端機印出詳細的錯誤原因，方便後續除錯
+        console.error(`❌ 檔案 [${filename}] 上傳失敗:`, error)
+        results.push({ fileName: filename, status: 'error' })
       }
     }
-  } catch (err) {
-    alert('批次上傳發生錯誤')
-    console.error(err)
-  } finally {
-    isUploading.value = false
-    uploadProgress.value = 0
-    fileInput.value.value = ''
   }
-}
 
-// 刪除錄音證據邏輯
-const deleteEvidence = async (id) => {
-  if (!confirm('⚠️ 確定要刪除這筆錄音證據的連結嗎？\n(注意：Telegram 上的原始檔案需手動刪除)')) return
-  
-  const { error } = await supabase
-    .from('evidence_logs')
-    .delete()
-    .eq('id', id)
-
-  if (!error) {
-    // 從畫面上移除該筆資料
-    evidenceList.value = evidenceList.value.filter(item => item.id !== id)
-  } else {
-    alert('刪除失敗，請稍後再試。')
-  }
-}
-</script>
-
-<template>
-  <div class="mt-4 bg-white p-4 rounded-xl shadow-sm border border-gray-200">
-    <div class="flex justify-between items-center mb-3">
-      <h2 class="text-md font-bold text-gray-800 flex items-center gap-2">
-        <span>🎙️</span> 語音證據清單
-      </h2>
-    </div>
-
-    <input ref="fileInput" type="file" multiple accept="audio/*,video/mp4" class="hidden" @change="handleBatchUpload" />
-
-    <button 
-      @click="$refs.fileInput.click()"
-      :disabled="isUploading"
-      class="w-full py-3 mb-4 border-2 border-dashed border-blue-300 rounded-xl text-blue-600 font-medium hover:bg-blue-50 active:bg-blue-100 transition-colors"
-    >
-      <span v-if="!isUploading">＋ 點擊選取手機錄音補傳 (可批次多選)</span>
-      <span v-else>正在加密上傳中 ({{ uploadProgress }}%)...</span>
-    </button>
-
-    <ul class="space-y-2">
-      <li v-for="item in evidenceList" :key="item.id" class="flex flex-col bg-gray-50 p-3 rounded-lg border gap-2">
-        <span class="text-sm font-medium text-gray-800 truncate">{{ item.title }}</span>
-        
-        <div class="flex justify-end gap-2">
-          <button @click="deleteEvidence(item.id)" class="px-3 py-1.5 bg-red-100 text-red-600 rounded-lg text-xs font-bold hover:bg-red-200">
-            刪除
-          </button>
-          <a :href="item.telegram_url" target="_blank" class="px-3 py-1.5 bg-gray-200 text-gray-700 rounded-lg text-xs font-bold hover:bg-gray-300 whitespace-nowrap">
-            開啟 TG 聽取
-          </a>
-        </div>
-      </li>
-    </ul>
-    <p v-if="evidenceList.length === 0" class="text-xs text-gray-400 text-center py-2">本日尚無附加錄音證據</p>
-  </div>
-</template>
+  return { success: true, results }
+})
