@@ -22,7 +22,6 @@ const fetchEvidence = async () => {
 
 onMounted(() => { fetchEvidence() })
 
-// 串接 Hugging Face FastAPI 後端進行上傳
 const handleBatchUpload = async () => {
   const files = fileInput.value?.files
   if (!files || files.length === 0) return
@@ -31,43 +30,54 @@ const handleBatchUpload = async () => {
   let successCount = 0
 
   try {
-    const hfApiUrl = config.public.hfApiUrl
-    if (!hfApiUrl) throw new Error('尚未設定 Hugging Face API 網址')
+    // 1. 安全處理 API 網址，自動去除結尾多餘的斜線
+    let rawApiUrl = config.public.hfApiUrl
+    if (!rawApiUrl) {
+      throw new Error('未抓取到環境變數 NUXT_PUBLIC_HF_API_URL，請檢查 .env 或 Vercel 後台設定')
+    }
+    const hfApiUrl = rawApiUrl.replace(/\/$/, '') 
+    
+    // 印出實際呼叫的網址，方便在 F12 控制台中除錯
+    console.log('準備傳送至 Hugging Face:', `${hfApiUrl}/upload/`)
 
-    // 針對每一個檔案，傳送給 Hugging Face 後端
     for (let i = 0; i < files.length; i++) {
       const file = files[i]
-      
       const formData = new FormData()
       formData.append('file', file)
-      // FastAPI 後端強制要求 topic_id，這裡以當前月份作為主題 ID，或根據您的群組設定帶入預設值 0
       formData.append('topic_id', new Date(props.currentDate).getMonth() + 1)
 
       uploadProgress.value = 10 + Math.floor((i / files.length) * 80)
 
-      // 呼叫 Hugging Face 的 /upload/ 端點
       const response = await fetch(`${hfApiUrl}/upload/`, {
         method: 'POST',
         body: formData
       })
 
+      // 2. 防禦性解析：先用 text() 讀取，不要直接用 json()
+      const responseText = await response.text()
+
       if (!response.ok) {
-        const errData = await response.json()
-        throw new Error(errData.detail || '伺服器發生錯誤')
+        console.error('伺服器錯誤內容:', responseText)
+        try {
+          // 嘗試解析是不是預期的 JSON 錯誤訊息
+          const errData = JSON.parse(responseText)
+          throw new Error(errData.detail || '伺服器拒絕請求')
+        } catch (e) {
+          // 如果解析 JSON 失敗 (代表是 HTML 網頁)，就報出這段話
+          throw new Error(`伺服器回傳了非 API 資料 (Status: ${response.status})。可能是網址錯誤或 HF 正在休眠。`)
+        }
       }
 
-      const result = await response.json()
+      // 如果順利走到這裡，代表一定是合法的 JSON 了
+      const result = JSON.parse(responseText)
 
-      // 成功後，將 Hugging Face 回傳的資料 (包含 SHA256 防偽指紋與連結) 存入 Supabase
       if (result.success) {
         const { error } = await supabase.from('evidence_logs').insert({
           log_date: props.currentDate,
           title: result.filename.split('.')[0] || '錄音檔',
           telegram_url: result.telegram_link,
-          file_name: result.filename,
-          // 若您的資料表有擴充，可以把 result.file_hash 也存起來作為法律證據
+          file_name: result.filename
         })
-
         if (!error) successCount++
       }
     }
@@ -80,7 +90,7 @@ const handleBatchUpload = async () => {
     }
 
   } catch (err) {
-    alert('上傳發生錯誤：' + err.message)
+    alert('上傳發生錯誤：\n' + err.message)
     console.error(err)
   } finally {
     isUploading.value = false
