@@ -22,64 +22,91 @@ const fetchEvidence = async () => {
 
 onMounted(() => { fetchEvidence() })
 
+// 🌟 新增：格式化時間函數 (將時間戳轉換為 YYYY-MM-DD_HHmm)
+const formatRecordingTime = (timestamp) => {
+  const d = new Date(timestamp)
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}`
+}
+
 const handleBatchUpload = async () => {
   const files = fileInput.value?.files
   if (!files || files.length === 0) return
 
   isUploading.value = true
+  uploadProgress.value = 0
   let successCount = 0
 
   try {
-    // 1. 安全處理 API 網址，自動去除結尾多餘的斜線
     let rawApiUrl = config.public.hfApiUrl
-    if (!rawApiUrl) {
-      throw new Error('未抓取到環境變數 NUXT_PUBLIC_HF_API_URL，請檢查 .env 或 Vercel 後台設定')
-    }
-    const hfApiUrl = rawApiUrl.replace(/\/$/, '') 
-    
-    // 印出實際呼叫的網址，方便在 F12 控制台中除錯
-    console.log('準備傳送至 Hugging Face:', `${hfApiUrl}/upload/`)
+    if (!rawApiUrl) throw new Error('未設定 Hugging Face API 網址')
+    const hfApiUrl = rawApiUrl.replace(/\/$/, '')
+
+    // 計算每個檔案佔總進度的比例 (例如 2 個檔案，每個佔 50%)
+    const sharePerFile = 100 / files.length
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i]
+
+      // 🌟 核心優化 1：取得檔案的「真實錄音時間」並重組檔名
+      // 這樣即使是三天前錄的音，檔名也會精準標示三天的日期與時間
+      const recordTime = formatRecordingTime(file.lastModified)
+      const newFilename = `${recordTime}_${file.name}`
+
       const formData = new FormData()
-      formData.append('file', file)
+      // 透過第三個參數，強制把重新命名的檔名傳給後端
+      formData.append('file', file, newFilename)
       formData.append('topic_id', new Date(props.currentDate).getMonth() + 1)
 
-      uploadProgress.value = 10 + Math.floor((i / files.length) * 80)
+      // 🌟 核心優化 2：改用 XHR 追蹤真實的逐 Byte 上傳進度
+      await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest()
+        xhr.open('POST', `${hfApiUrl}/upload/`)
 
-      const response = await fetch(`${hfApiUrl}/upload/`, {
-        method: 'POST',
-        body: formData
-      })
-
-      // 2. 防禦性解析：先用 text() 讀取，不要直接用 json()
-      const responseText = await response.text()
-
-      if (!response.ok) {
-        console.error('伺服器錯誤內容:', responseText)
-        try {
-          // 嘗試解析是不是預期的 JSON 錯誤訊息
-          const errData = JSON.parse(responseText)
-          throw new Error(errData.detail || '伺服器拒絕請求')
-        } catch (e) {
-          // 如果解析 JSON 失敗 (代表是 HTML 網頁)，就報出這段話
-          throw new Error(`伺服器回傳了非 API 資料 (Status: ${response.status})。可能是網址錯誤或 HF 正在休眠。`)
+        // 監聽上傳進度事件
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) {
+            const currentFileProgress = (e.loaded / e.total) * sharePerFile
+            uploadProgress.value = Math.floor((i * sharePerFile) + currentFileProgress)
+          }
         }
-      }
 
-      // 如果順利走到這裡，代表一定是合法的 JSON 了
-      const result = JSON.parse(responseText)
+        xhr.onload = async () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            try {
+              const result = JSON.parse(xhr.responseText)
+              if (result.success) {
+                // 存入 Supabase，標題也同步使用帶有日期的檔名
+                const { error } = await supabase.from('evidence_logs').insert({
+                  log_date: props.currentDate,
+                  title: newFilename.split('.')[0], 
+                  telegram_url: result.telegram_link,
+                  file_name: newFilename
+                })
+                if (!error) successCount++
+                resolve()
+              } else {
+                reject(new Error('伺服器處理失敗'))
+              }
+            } catch (err) {
+              reject(new Error('伺服器回傳格式錯誤 (非 JSON)'))
+            }
+          } else {
+            // 嘗試解析錯誤訊息
+            let errorMsg = `狀態碼 ${xhr.status}`
+            try {
+              const errData = JSON.parse(xhr.responseText)
+              if (errData.detail) errorMsg = errData.detail
+            } catch (e) {
+               // 忽略 HTML 解析錯誤
+            }
+            reject(new Error(`伺服器錯誤: ${errorMsg}`))
+          }
+        }
 
-      if (result.success) {
-        const { error } = await supabase.from('evidence_logs').insert({
-          log_date: props.currentDate,
-          title: result.filename.split('.')[0] || '錄音檔',
-          telegram_url: result.telegram_link,
-          file_name: result.filename
-        })
-        if (!error) successCount++
-      }
+        xhr.onerror = () => reject(new Error('網路連線中斷'))
+        xhr.send(formData)
+      })
     }
 
     if (successCount > 0) {
