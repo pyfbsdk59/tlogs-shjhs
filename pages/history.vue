@@ -7,11 +7,13 @@ const currentYear = ref(new Date().getFullYear())
 const currentMonth = ref(new Date().getMonth())
 const recordedDates = ref(new Set()) 
 
-const selectedDate = ref(null) // 使用者點選的日期
-const dayLogs = ref([]) // 當天的文字紀錄陣列
-const dayEvidences = ref([]) // 當天的錄音證據陣列
+const selectedDate = ref(null)
+const dayLogs = ref([]) 
 
-// (保留之前的 calendarDays 與切換月份邏輯)
+// 編輯狀態管理
+const editingId = ref(null) // 記錄目前正在編輯哪一筆日誌的 ID
+const editContent = ref('') // 暫存編輯中的文字
+
 const calendarDays = computed(() => {
   const days = []
   const firstDay = new Date(currentYear.value, currentMonth.value, 1).getDay()
@@ -37,28 +39,71 @@ const nextMonth = () => { currentMonth.value === 11 ? (currentMonth.value = 0, c
 watch([currentYear, currentMonth], fetchMonthlyRecords)
 onMounted(fetchMonthlyRecords)
 
-// --- 新增：點擊日曆讀取當日詳細資料 ---
+// 載入當日資料
 const loadDayDetails = async (dateStr) => {
   selectedDate.value = dateStr
+  editingId.value = null // 切換日期時清除編輯狀態
   
-  // 抓取當天所有文字日誌 (依時間排序)
   const { data: logsData } = await supabase
     .from('counseling_logs')
     .select('*')
     .eq('record_date', dateStr)
     .order('updated_at', { ascending: true })
-    
-  // 抓取當天所有錄音證據
-  const { data: evidenceData } = await supabase
-    .from('evidence_logs')
-    .select('*')
-    .eq('log_date', dateStr)
 
   dayLogs.value = logsData || []
-  dayEvidences.value = evidenceData || []
 }
 
-// 格式化時間
+// --- 日誌文字編輯與刪除功能 ---
+const startEdit = (log) => {
+  editingId.value = log.id
+  editContent.value = log.content
+}
+
+const cancelEdit = () => {
+  editingId.value = null
+  editContent.value = ''
+}
+
+const saveEdit = async (logId) => {
+  const { error } = await supabase
+    .from('counseling_logs')
+    .update({ 
+      content: editContent.value,
+      updated_at: new Date().toISOString()
+    })
+    .eq('id', logId)
+
+  if (!error) {
+    // 更新本地畫面
+    const target = dayLogs.value.find(log => log.id === logId)
+    if (target) target.content = editContent.value
+    editingId.value = null // 退出編輯模式
+  } else {
+    alert('儲存失敗！')
+  }
+}
+
+const deleteLog = async (logId) => {
+  if (!confirm('⚠️ 確定要刪除這筆文字日誌嗎？刪除後無法復原。')) return
+
+  const { error } = await supabase
+    .from('counseling_logs')
+    .delete()
+    .eq('id', logId)
+
+  if (!error) {
+    // 從畫面陣列中移除
+    dayLogs.value = dayLogs.value.filter(log => log.id !== logId)
+    
+    // 如果當天所有日誌都被刪光了，重新抓取日曆亮點
+    if (dayLogs.value.length === 0) {
+      fetchMonthlyRecords()
+    }
+  } else {
+    alert('刪除失敗！')
+  }
+}
+
 const formatTime = (isoString) => new Date(isoString).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' })
 </script>
 
@@ -102,26 +147,40 @@ const formatTime = (isoString) => new Date(isoString).toLocaleTimeString('zh-TW'
     <div v-if="selectedDate" class="space-y-4">
       <h3 class="text-xl font-bold text-gray-800 border-b pb-2">{{ selectedDate }} 的紀錄</h3>
       
-      <div v-for="(log, idx) in dayLogs" :key="log.id" class="bg-white p-4 rounded-xl shadow-sm border">
-        <div class="flex justify-between items-center mb-2">
-          <span class="text-sm font-bold text-gray-500">紀錄 #{{ idx + 1 }}</span>
+      <div v-for="(log, idx) in dayLogs" :key="log.id" class="bg-white p-4 rounded-xl shadow-sm border relative">
+        <div class="flex justify-between items-center mb-3">
+          <span class="text-sm font-bold text-gray-500 bg-gray-100 px-2 py-1 rounded">紀錄 #{{ idx + 1 }}</span>
           <span class="text-xs text-gray-400">{{ formatTime(log.updated_at) }}</span>
         </div>
-        <p class="text-gray-800 whitespace-pre-wrap">{{ log.content }}</p>
-      </div>
-      <p v-if="dayLogs.length === 0" class="text-gray-500 text-center py-4">本日無文字紀錄</p>
 
-      <div v-if="dayEvidences.length > 0" class="bg-red-50 p-4 rounded-xl border border-red-100 mt-4">
-        <h4 class="text-sm font-bold text-red-700 mb-3">🎙️ 當日附加檔案 ({{ dayEvidences.length }}筆)</h4>
-        <ul class="space-y-2">
-          <li v-for="item in dayEvidences" :key="item.id" class="flex justify-between items-center bg-white p-2 rounded-lg border">
-            <span class="text-sm text-gray-800 truncate pr-2">{{ item.title }}</span>
-            <a :href="item.telegram_url" target="_blank" class="px-3 py-1 bg-gray-200 rounded text-xs font-bold hover:bg-gray-300">
-              開啟 TG 聽取
-            </a>
-          </li>
-        </ul>
+        <div v-if="editingId === log.id">
+          <textarea 
+            v-model="editContent" 
+            class="w-full min-h-[120px] p-3 border-2 border-blue-300 rounded-lg text-[16px] focus:outline-none focus:ring-2 focus:ring-blue-500 mb-3 bg-blue-50"
+          ></textarea>
+          <div class="flex justify-end gap-2">
+            <button @click="cancelEdit" class="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg font-medium">取消</button>
+            <button @click="saveEdit(log.id)" class="px-4 py-2 bg-blue-600 text-white rounded-lg font-medium">儲存修改</button>
+          </div>
+        </div>
+
+        <div v-else>
+          <p class="text-gray-800 whitespace-pre-wrap leading-relaxed mb-4">{{ log.content }}</p>
+          <div class="flex justify-end gap-2 border-t pt-3">
+            <button @click="deleteLog(log.id)" class="px-3 py-1.5 text-red-500 bg-red-50 hover:bg-red-100 rounded-md text-sm font-bold">
+              刪除紀錄
+            </button>
+            <button @click="startEdit(log)" class="px-3 py-1.5 text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-md text-sm font-bold">
+              編輯文字
+            </button>
+          </div>
+        </div>
       </div>
+
+      <p v-if="dayLogs.length === 0" class="text-gray-500 text-center py-4 bg-white rounded-xl border border-dashed">本日尚無文字紀錄</p>
+
+      <EvidenceUploader :currentDate="selectedDate" :key="selectedDate" />
+      
     </div>
     
   </div>
