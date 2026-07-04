@@ -6,12 +6,12 @@ const props = defineProps({
 })
 
 const supabase = useSupabaseClient()
+const config = useRuntimeConfig()
 const fileInput = ref(null)
 const isUploading = ref(false)
 const uploadProgress = ref(0)
 const evidenceList = ref([])
 
-// 載入證據
 const fetchEvidence = async () => {
   const { data } = await supabase
     .from('evidence_logs')
@@ -20,55 +20,67 @@ const fetchEvidence = async () => {
   if (data) evidenceList.value = data
 }
 
-onMounted(() => {
-  fetchEvidence()
-})
+onMounted(() => { fetchEvidence() })
 
-// 批次上傳邏輯
+// 串接 Hugging Face FastAPI 後端進行上傳
 const handleBatchUpload = async () => {
   const files = fileInput.value?.files
   if (!files || files.length === 0) return
 
   isUploading.value = true
-  uploadProgress.value = 10
-
-  const formData = new FormData()
-  for (let i = 0; i < files.length; i++) {
-    formData.append('files', files[i])
-  }
+  let successCount = 0
 
   try {
-    uploadProgress.value = 50
-    const response = await $fetch('/api/upload-evidence', {
-      method: 'POST',
-      body: formData
-    })
+    const hfApiUrl = config.public.hfApiUrl
+    if (!hfApiUrl) throw new Error('尚未設定 Hugging Face API 網址')
 
-    if (response.success) {
-      uploadProgress.value = 80
-      const insertData = response.results
-        .filter(r => r.status === 'success')
-        .map(r => ({
+    // 針對每一個檔案，傳送給 Hugging Face 後端
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i]
+      
+      const formData = new FormData()
+      formData.append('file', file)
+      // FastAPI 後端強制要求 topic_id，這裡以當前月份作為主題 ID，或根據您的群組設定帶入預設值 0
+      formData.append('topic_id', new Date(props.currentDate).getMonth() + 1)
+
+      uploadProgress.value = 10 + Math.floor((i / files.length) * 80)
+
+      // 呼叫 Hugging Face 的 /upload/ 端點
+      const response = await fetch(`${hfApiUrl}/upload/`, {
+        method: 'POST',
+        body: formData
+      })
+
+      if (!response.ok) {
+        const errData = await response.json()
+        throw new Error(errData.detail || '伺服器發生錯誤')
+      }
+
+      const result = await response.json()
+
+      // 成功後，將 Hugging Face 回傳的資料 (包含 SHA256 防偽指紋與連結) 存入 Supabase
+      if (result.success) {
+        const { error } = await supabase.from('evidence_logs').insert({
           log_date: props.currentDate,
-          title: r.fileName.split('.')[0],
-          telegram_url: r.telegramUrl,
-          file_name: r.fileName
-        }))
+          title: result.filename.split('.')[0] || '錄音檔',
+          telegram_url: result.telegram_link,
+          file_name: result.filename,
+          // 若您的資料表有擴充，可以把 result.file_hash 也存起來作為法律證據
+        })
 
-      if (insertData.length > 0) {
-        const { data, error } = await supabase
-          .from('evidence_logs')
-          .insert(insertData)
-          .select()
-
-        if (!error && data) {
-          evidenceList.value.push(...data)
-          alert(`✅ 成功上傳 ${insertData.length} 筆錄音證據！`)
-        }
+        if (!error) successCount++
       }
     }
+
+    if (successCount > 0) {
+      alert(`✅ 成功上傳 ${successCount} 筆證據！`)
+      fetchEvidence()
+    } else {
+      alert('上傳失敗，請檢查網路連線。')
+    }
+
   } catch (err) {
-    alert('批次上傳發生錯誤')
+    alert('上傳發生錯誤：' + err.message)
     console.error(err)
   } finally {
     isUploading.value = false
@@ -77,21 +89,10 @@ const handleBatchUpload = async () => {
   }
 }
 
-// 刪除錄音證據邏輯
 const deleteEvidence = async (id) => {
-  if (!confirm('⚠️ 確定要刪除這筆錄音證據的連結嗎？\n(注意：Telegram 上的原始檔案需手動刪除)')) return
-  
-  const { error } = await supabase
-    .from('evidence_logs')
-    .delete()
-    .eq('id', id)
-
-  if (!error) {
-    // 從畫面上移除該筆資料
-    evidenceList.value = evidenceList.value.filter(item => item.id !== id)
-  } else {
-    alert('刪除失敗，請稍後再試。')
-  }
+  if (!confirm('⚠️ 確定要刪除這筆錄音證據的連結嗎？')) return
+  const { error } = await supabase.from('evidence_logs').delete().eq('id', id)
+  if (!error) evidenceList.value = evidenceList.value.filter(item => item.id !== id)
 }
 </script>
 

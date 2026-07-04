@@ -4,8 +4,13 @@ export default defineNuxtConfig({
     '@vueuse/nuxt',
     '@nuxtjs/supabase'
   ],
+  runtimeConfig: {
+    public: {
+      hfApiUrl: process.env.NUXT_PUBLIC_HF_API_URL
+    }
+  },
   supabase: {
-    // 開發初期建議先關閉自動路由攔截，方便測試
-    redirect: false 
-  }
+    redirect: false
+  },
+  compatibilityDate: '2024-04-03'
 })
