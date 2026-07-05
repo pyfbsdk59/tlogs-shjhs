@@ -22,11 +22,22 @@ const fetchEvidence = async () => {
 
 onMounted(() => { fetchEvidence() })
 
-// 格式化時間函數 (將時間戳轉換為 YYYY-MM-DD_HHmm)
 const formatRecordingTime = (timestamp) => {
   const d = new Date(timestamp)
   const pad = (n) => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}`
+}
+
+// 🌟 新增：專門用來產生乾淨下載網址的函數 (避開 Vue 模板編譯錯誤)
+const getDownloadUrl = (messageId) => {
+  if (!config.public.hfApiUrl) return '#'
+  
+  // 使用安全的字串方法 (endsWith 與 slice) 取代正規表達式
+  const baseUrl = config.public.hfApiUrl.endsWith('/') 
+    ? config.public.hfApiUrl.slice(0, -1) 
+    : config.public.hfApiUrl
+    
+  return `${baseUrl}/download/${messageId}`
 }
 
 const handleBatchUpload = async () => {
@@ -40,6 +51,8 @@ const handleBatchUpload = async () => {
   try {
     let rawApiUrl = config.public.hfApiUrl
     if (!rawApiUrl) throw new Error('未設定 Hugging Face API 網址')
+    
+    // 在 script 區塊使用正規表達式是絕對安全的
     const hfApiUrl = rawApiUrl.replace(/\/$/, '')
 
     const sharePerFile = 100 / files.length
@@ -69,8 +82,6 @@ const handleBatchUpload = async () => {
             try {
               const result = JSON.parse(xhr.responseText)
               if (result.success) {
-                
-                // 🌟 核心修正：將 message_id 一併存入 Supabase
                 const { error } = await supabase.from('evidence_logs').insert({
                   log_date: props.currentDate,
                   title: newFilename.split('.')[0], 
@@ -153,7 +164,7 @@ const deleteEvidence = async (id) => {
           
           <a 
             v-if="item.message_id"
-            :href="`${config.public.hfApiUrl?.replace(/\\/$/, '')}/download/${item.message_id}`" 
+            :href="getDownloadUrl(item.message_id)" 
             target="_blank" 
             class="flex-1 text-center px-2 py-2 bg-green-500 text-white rounded-lg text-xs font-bold hover:bg-green-600 shadow-sm whitespace-nowrap"
           >
