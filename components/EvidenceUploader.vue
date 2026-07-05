@@ -22,7 +22,7 @@ const fetchEvidence = async () => {
 
 onMounted(() => { fetchEvidence() })
 
-// 🌟 新增：格式化時間函數 (將時間戳轉換為 YYYY-MM-DD_HHmm)
+// 格式化時間函數 (將時間戳轉換為 YYYY-MM-DD_HHmm)
 const formatRecordingTime = (timestamp) => {
   const d = new Date(timestamp)
   const pad = (n) => String(n).padStart(2, '0')
@@ -42,28 +42,21 @@ const handleBatchUpload = async () => {
     if (!rawApiUrl) throw new Error('未設定 Hugging Face API 網址')
     const hfApiUrl = rawApiUrl.replace(/\/$/, '')
 
-    // 計算每個檔案佔總進度的比例 (例如 2 個檔案，每個佔 50%)
     const sharePerFile = 100 / files.length
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i]
-
-      // 🌟 核心優化 1：取得檔案的「真實錄音時間」並重組檔名
-      // 這樣即使是三天前錄的音，檔名也會精準標示三天的日期與時間
       const recordTime = formatRecordingTime(file.lastModified)
       const newFilename = `${recordTime}_${file.name}`
 
       const formData = new FormData()
-      // 透過第三個參數，強制把重新命名的檔名傳給後端
       formData.append('file', file, newFilename)
       formData.append('topic_id', new Date(props.currentDate).getMonth() + 1)
 
-      // 🌟 核心優化 2：改用 XHR 追蹤真實的逐 Byte 上傳進度
       await new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest()
         xhr.open('POST', `${hfApiUrl}/upload/`)
 
-        // 監聽上傳進度事件
         xhr.upload.onprogress = (e) => {
           if (e.lengthComputable) {
             const currentFileProgress = (e.loaded / e.total) * sharePerFile
@@ -76,13 +69,16 @@ const handleBatchUpload = async () => {
             try {
               const result = JSON.parse(xhr.responseText)
               if (result.success) {
-                // 存入 Supabase，標題也同步使用帶有日期的檔名
+                
+                // 🌟 核心修正：將 message_id 一併存入 Supabase
                 const { error } = await supabase.from('evidence_logs').insert({
                   log_date: props.currentDate,
                   title: newFilename.split('.')[0], 
                   telegram_url: result.telegram_link,
-                  file_name: newFilename
+                  file_name: newFilename,
+                  message_id: result.message_id 
                 })
+                
                 if (!error) successCount++
                 resolve()
               } else {
@@ -92,14 +88,11 @@ const handleBatchUpload = async () => {
               reject(new Error('伺服器回傳格式錯誤 (非 JSON)'))
             }
           } else {
-            // 嘗試解析錯誤訊息
             let errorMsg = `狀態碼 ${xhr.status}`
             try {
               const errData = JSON.parse(xhr.responseText)
               if (errData.detail) errorMsg = errData.detail
-            } catch (e) {
-               // 忽略 HTML 解析錯誤
-            }
+            } catch (e) {}
             reject(new Error(`伺服器錯誤: ${errorMsg}`))
           }
         }
@@ -141,10 +134,8 @@ const deleteEvidence = async (id) => {
       </h2>
     </div>
 
-    <!-- 隱藏的輸入框 -->
     <input ref="fileInput" type="file" multiple accept="audio/*,video/mp4" class="hidden" @change="handleBatchUpload" />
 
-    <!-- 批次上傳按鈕 -->
     <button 
       @click="$refs.fileInput.click()"
       :disabled="isUploading"
@@ -154,21 +145,40 @@ const deleteEvidence = async (id) => {
       <span v-else>正在加密上傳中 ({{ uploadProgress }}%)...</span>
     </button>
 
-    <!-- 證據列表 -->
-    <ul class="space-y-2">
-      <li v-for="item in evidenceList" :key="item.id" class="flex flex-col bg-gray-50 p-3 rounded-lg border gap-2">
-        <span class="text-sm font-medium text-gray-800 truncate">{{ item.title }}</span>
+    <ul class="space-y-3">
+      <li v-for="item in evidenceList" :key="item.id" class="flex flex-col bg-gray-50 p-3 rounded-lg border border-gray-200 gap-3">
+        <span class="text-sm font-bold text-gray-800 break-all">{{ item.title }}</span>
         
-        <div class="flex justify-end gap-2">
-          <button @click="deleteEvidence(item.id)" class="px-3 py-1.5 bg-red-100 text-red-600 rounded-lg text-xs font-bold hover:bg-red-200">
-            刪除
-          </button>
-          <a :href="item.telegram_url" target="_blank" class="px-3 py-1.5 bg-gray-200 text-gray-700 rounded-lg text-xs font-bold hover:bg-gray-300 whitespace-nowrap">
-            開啟 TG 聽取
+        <div class="flex flex-wrap gap-2">
+          
+          <a 
+            v-if="item.message_id"
+            :href="`${config.public.hfApiUrl?.replace(/\\/$/, '')}/download/${item.message_id}`" 
+            target="_blank" 
+            class="flex-1 text-center px-2 py-2 bg-green-500 text-white rounded-lg text-xs font-bold hover:bg-green-600 shadow-sm whitespace-nowrap"
+          >
+            ▶️ 立即串流下載🔗
           </a>
+
+          <a 
+            :href="item.telegram_url" 
+            target="_blank" 
+            class="flex-1 text-center px-2 py-2 bg-blue-500 text-white rounded-lg text-xs font-bold hover:bg-blue-600 shadow-sm whitespace-nowrap"
+          >
+            ✈️ TG 原文
+          </a>
+
+          <button 
+            @click="deleteEvidence(item.id)" 
+            class="px-3 py-2 bg-red-100 text-red-600 rounded-lg text-xs font-bold hover:bg-red-200 shadow-sm whitespace-nowrap"
+          >
+            🗑️ 刪除
+          </button>
+          
         </div>
       </li>
     </ul>
+    
     <p v-if="evidenceList.length === 0" class="text-xs text-gray-400 text-center py-2">本日尚無附加錄音證據</p>
   </div>
 </template>
